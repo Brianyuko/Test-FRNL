@@ -2,22 +2,24 @@
 
 import 'package:flutter/material.dart';
 import 'dart:async';
-import 'dart:math';
 import 'package:facesdk_plugin/facesdk_plugin.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:flutter_exif_rotation/flutter_exif_rotation.dart';
-import 'package:path/path.dart';
-import 'package:sqflite/sqflite.dart';
 import 'package:fluttertoast/fluttertoast.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:io' show Platform;
 import 'about.dart';
 import 'settings.dart';
-import 'person.dart';
-import 'personview.dart';
+import 'employee.dart';
+import 'employeeview.dart';
+import 'facestore.dart';
 import 'facedetectionview.dart';
 
-void main() {
+typedef EnrollTarget = ({String id, String name});
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await FaceStore.init();
   runApp(const MyApp());
 }
 
@@ -37,12 +39,10 @@ class MyApp extends StatelessWidget {
   }
 }
 
-// ignore: must_be_immutable
 class MyHomePage extends StatefulWidget {
   final String title;
-  var personList = <Person>[];
 
-  MyHomePage({super.key, required this.title});
+  const MyHomePage({super.key, required this.title});
 
   @override
   MyHomePageState createState() => MyHomePageState();
@@ -51,6 +51,8 @@ class MyHomePage extends StatefulWidget {
 class MyHomePageState extends State<MyHomePage> {
   String _warningState = "";
   bool _visibleWarning = false;
+  List<Employee> _employees = [];
+  Map<String, String> _serverVersions = {};
 
   final _facesdkPlugin = FacesdkPlugin();
 
@@ -94,7 +96,9 @@ class MyHomePageState extends State<MyHomePage> {
       }
     } catch (e) {}
 
-    List<Person> personList = await loadAllPersons();
+    // Setara saat membuka halaman login: cek created_on ke server dulu.
+    final syncResult = await syncFromServer();
+    debugPrint(syncResult.toString());
     await SettingsPageState.initSettings();
 
     final prefs = await SharedPreferences.getInstance();
@@ -130,74 +134,13 @@ class MyHomePageState extends State<MyHomePage> {
     setState(() {
       _warningState = warningState;
       _visibleWarning = visibleWarning;
-      widget.personList = personList;
     });
+    refreshEmployees();
   }
 
-  Future<Database> createDB() async {
-    final database = openDatabase(
-      // Set the path to the database. Note: Using the `join` function from the
-      // `path` package is best practice to ensure the path is correctly
-      // constructed for each platform.
-      join(await getDatabasesPath(), 'person.db'),
-      // When the database is first created, create a table to store dogs.
-      onCreate: (db, version) {
-        // Run the CREATE TABLE statement on the database.
-        return db.execute(
-          'CREATE TABLE person(name text, faceJpg blob, templates blob)',
-        );
-      },
-      // Set the version. This executes the onCreate function and provides a
-      // path to perform database upgrades and downgrades.
-      version: 1,
-    );
-
-    return database;
-  }
-
-  // A method that retrieves all the dogs from the dogs table.
-  Future<List<Person>> loadAllPersons() async {
-    // Get a reference to the database.
-    final db = await createDB();
-
-    // Query the table for all The Dogs.
-    final List<Map<String, dynamic>> maps = await db.query('person');
-
-    // Convert the List<Map<String, dynamic> into a List<Dog>.
-    return List.generate(maps.length, (i) {
-      return Person.fromMap(maps[i]);
-    });
-  }
-
-  Future<void> insertPerson(Person person) async {
-    // Get a reference to the database.
-    final db = await createDB();
-
-    // Insert the Dog into the correct table. You might also specify the
-    // `conflictAlgorithm` to use in case the same dog is inserted twice.
-    //
-    // In this case, replace any previous data.
-    await db.insert(
-      'person',
-      person.toMap(),
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
-
-    setState(() {
-      widget.personList.add(person);
-    });
-  }
-
-  Future<void> deleteAllPerson() async {
-    final db = await createDB();
-    await db.delete('person');
-
-    setState(() {
-      widget.personList.clear();
-    });
-
+  void showToast(String message) {
     Fluttertoast.showToast(
-        msg: "All person deleted!",
+        msg: message,
         toastLength: Toast.LENGTH_SHORT,
         gravity: ToastGravity.BOTTOM,
         timeInSecForIosWeb: 1,
@@ -206,67 +149,196 @@ class MyHomePageState extends State<MyHomePage> {
         fontSize: 16.0);
   }
 
-  Future<void> deletePerson(index) async {
-    // ignore: invalid_use_of_protected_member
-
-    final db = await createDB();
-    await db.delete('person',
-        where: 'name=?', whereArgs: [widget.personList[index].name]);
-
-    // ignore: invalid_use_of_protected_member
+  void refreshEmployees() {
     setState(() {
-      widget.personList.removeAt(index);
+      _employees = LocalStore.getEmployees();
+      _serverVersions = MockServer.getVersions();
     });
-
-    Fluttertoast.showToast(
-        msg: "Person removed!",
-        toastLength: Toast.LENGTH_SHORT,
-        gravity: ToastGravity.BOTTOM,
-        timeInSecForIosWeb: 1,
-        backgroundColor: Colors.red,
-        textColor: Colors.white,
-        fontSize: 16.0);
   }
 
-  Future enrollPerson() async {
+  Future<void> syncEmployees() async {
+    final result = await syncFromServer();
+    refreshEmployees();
+    showToast(result.toString());
+  }
+
+  Future<void> deleteAllEmployees() async {
+    await MockServer.clear();
+    await LocalStore.clear();
+    refreshEmployees();
+    showToast("All employee deleted!");
+  }
+
+  Future<void> deleteFace(Employee employee, int index) async {
+    final updated = await MockServer.removeFace(employee.employeeId, index);
+    if (updated == null) {
+      await LocalStore.delete(employee.employeeId);
+    } else {
+      await LocalStore.save(updated);
+    }
+    refreshEmployees();
+    showToast("Foto dihapus!");
+  }
+
+  Future<void> onEmployeeAction(Employee employee, String action) async {
+    switch (action) {
+      case 'server_update':
+        await MockServer.touch(employee.employeeId);
+        showToast("created_on di Mock Server berubah, lokal belum. Tekan Sync.");
+      case 'server_delete':
+        await MockServer.deleteEmployee(employee.employeeId);
+        showToast("Dihapus di Mock Server, lokal belum. Tekan Sync.");
+      case 'delete':
+        await MockServer.deleteEmployee(employee.employeeId);
+        await LocalStore.delete(employee.employeeId);
+        showToast("Employee dihapus!");
+    }
+    refreshEmployees();
+  }
+
+  Future<void> showEnrollTarget() async {
+    final employees = MockServer.getEmployees();
+    var newName = "";
+
+    final target = await showDialog<EnrollTarget>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Pilih Employee'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                decoration:
+                    const InputDecoration(labelText: 'Nama employee baru'),
+                textCapitalization: TextCapitalization.words,
+                onChanged: (value) => newName = value,
+              ),
+              const SizedBox(height: 8),
+              Flexible(
+                child: ListView(
+                  shrinkWrap: true,
+                  children: [
+                    for (final employee in employees)
+                      ListTile(
+                        title: Text(employee.name),
+                        subtitle: Text(
+                            '${employee.faces.length}/$maxFacesPerEmployee foto'),
+                        enabled: employee.faces.length < maxFacesPerEmployee,
+                        onTap: () => Navigator.pop(dialogContext,
+                            (id: employee.employeeId, name: employee.name)),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Batal'),
+          ),
+          TextButton(
+            onPressed: () {
+              final name = newName.trim();
+              if (name.isEmpty) return;
+              final exists = employees
+                  .any((e) => e.name.toLowerCase() == name.toLowerCase());
+              if (exists) {
+                showToast("Nama sudah ada, pilih dari daftar");
+                return;
+              }
+              Navigator.pop(dialogContext, (
+                id: DateTime.now().microsecondsSinceEpoch.toString(),
+                name: name,
+              ));
+            },
+            child: const Text('Tambah Baru'),
+          ),
+        ],
+      ),
+    );
+
+    if (target != null) showEnrollSource(target);
+  }
+
+  void showEnrollSource(EnrollTarget target) {
+    showModalBottomSheet(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              title: Text('Enroll foto untuk ${target.name}'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.camera_alt),
+              title: const Text('Kamera'),
+              onTap: () {
+                Navigator.pop(sheetContext);
+                enrollFace(target, ImageSource.camera);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_library),
+              title: const Text('Galeri'),
+              onTap: () {
+                Navigator.pop(sheetContext);
+                enrollFace(target, ImageSource.gallery);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> enrollFace(EnrollTarget target, ImageSource source) async {
     try {
-      final image = await ImagePicker().pickImage(source: ImageSource.gallery);
+      final image = await ImagePicker().pickImage(
+        source: source,
+        preferredCameraDevice: CameraDevice.front,
+      );
       if (image == null) return;
 
       var rotatedImage =
           await FlutterExifRotation.rotateImage(path: image.path);
 
       final faces = await _facesdkPlugin.extractFaces(rotatedImage.path);
-      for (var face in faces) {
-        num randomNumber =
-            10000 + Random().nextInt(10000); // from 0 upto 99 included
-        Person person = Person(
-            name: 'Person' + randomNumber.toString(),
-            faceJpg: face['faceJpg'],
-            templates: face['templates']);
-        insertPerson(person);
+      if (faces.length == 0) {
+        showToast("No face detected!");
+        return;
+      }
+      if (faces.length > 1) {
+        showToast("Terdeteksi lebih dari 1 wajah, gunakan foto dengan 1 wajah");
+        return;
       }
 
-      if (faces.length == 0) {
-        Fluttertoast.showToast(
-            msg: "No face detected!",
-            toastLength: Toast.LENGTH_SHORT,
-            gravity: ToastGravity.BOTTOM,
-            timeInSecForIosWeb: 1,
-            backgroundColor: Colors.red,
-            textColor: Colors.white,
-            fontSize: 16.0);
-      } else {
-        Fluttertoast.showToast(
-            msg: "Person enrolled!",
-            toastLength: Toast.LENGTH_SHORT,
-            gravity: ToastGravity.BOTTOM,
-            timeInSecForIosWeb: 1,
-            backgroundColor: Colors.red,
-            textColor: Colors.white,
-            fontSize: 16.0);
-      }
-    } catch (e) {}
+      final face = FaceEntry(
+        templates: faces[0]['templates'],
+        faceJpg: faces[0]['faceJpg'],
+      );
+      debugPrint('ENROLL ${target.name}: liveness=${faces[0]['liveness']}');
+
+      // Setara API registrasi: simpan ke server, lalu saat itu juga ke lokal
+      // dengan created_on yang sama.
+      final employee = await MockServer.addFace(
+        employeeId: target.id,
+        name: target.name,
+        face: face,
+      );
+      await LocalStore.save(employee);
+      refreshEmployees();
+
+      showToast(
+          "Foto ${employee.faces.length}/$maxFacesPerEmployee tersimpan untuk ${employee.name}");
+    } catch (e) {
+      debugPrint('enroll error: $e');
+      showToast("Enroll gagal: $e");
+    }
   }
 
   @override
@@ -276,6 +348,13 @@ class MyHomePageState extends State<MyHomePage> {
         title: const Text('Face Recognition'),
         toolbarHeight: 70,
         centerTitle: true,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.sync),
+            tooltip: 'Sync dari Mock Server',
+            onPressed: syncEmployees,
+          ),
+        ],
       ),
       body: Container(
         margin: const EdgeInsets.only(left: 16.0, right: 16.0),
@@ -312,7 +391,8 @@ class MyHomePageState extends State<MyHomePage> {
                             borderRadius:
                                 BorderRadius.all(Radius.circular(12.0)),
                           )),
-                      onPressed: enrollPerson),
+                    onPressed: showEnrollTarget,
+                  ),
                 ),
                 const SizedBox(width: 20),
                 Expanded(
@@ -335,7 +415,7 @@ class MyHomePageState extends State<MyHomePage> {
                           context,
                           MaterialPageRoute(
                               builder: (context) => FaceRecognitionView(
-                                    personList: widget.personList,
+                                    personList: LocalStore.toPersonList(),
                                   )),
                         );
                       }),
@@ -402,8 +482,9 @@ class MyHomePageState extends State<MyHomePage> {
             Expanded(
                 child: Stack(
               children: [
-                PersonView(
-                  personList: widget.personList,
+                EmployeeView(
+                  employees: _employees,
+                  serverVersions: _serverVersions,
                   homePageState: this,
                 ),
                 Column(

@@ -1,9 +1,7 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:facesdk_plugin/facedetection_interface.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:facesdk_plugin/facesdk_plugin.dart';
@@ -35,6 +33,7 @@ class FaceRecognitionViewState extends State<FaceRecognitionView> {
   var _identifiedFace;
   // ignore: prefer_typing_uninitialized_variables
   var _enrolledFace;
+  double _liveSimilarity = -1;
   final _facesdkPlugin = FacesdkPlugin();
   FaceDetectionViewController? faceDetectionViewController;
 
@@ -111,6 +110,10 @@ class FaceRecognitionViewState extends State<FaceRecognitionView> {
       }
     }
 
+    if (mounted) {
+      setState(() => _liveSimilarity = maxSimilarity);
+    }
+
     Future.delayed(const Duration(milliseconds: 100), () {
       if (!mounted) return false;
       setState(() {
@@ -156,7 +159,11 @@ class FaceRecognitionViewState extends State<FaceRecognitionView> {
               height: double.infinity,
               child: CustomPaint(
                 painter: FacePainter(
-                    faces: _faces, livenessThreshold: _livenessThreshold),
+                  faces: _faces,
+                  livenessThreshold: _livenessThreshold,
+                  similarity: _liveSimilarity, // ← tambahkan
+                  identifyThreshold: _identifyThreshold,
+                ),
               ),
             ),
             Visibility(
@@ -375,7 +382,14 @@ class _FaceDetectionViewState extends State<FaceDetectionView> {
 class FacePainter extends CustomPainter {
   dynamic faces;
   double livenessThreshold;
-  FacePainter({required this.faces, required this.livenessThreshold});
+  double similarity;
+  double identifyThreshold;
+  FacePainter({
+    required this.faces,
+    required this.livenessThreshold,
+    required this.similarity,
+    required this.identifyThreshold,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -393,20 +407,31 @@ class FacePainter extends CustomPainter {
         Color color = const Color.fromARGB(0xff, 0xff, 0, 0);
         if (face['liveness'] < livenessThreshold) {
           color = const Color.fromARGB(0xff, 0xff, 0, 0);
-          title = "Spoof" + face['liveness'].toString();
+          title = "Spoof ${face['liveness'].toStringAsFixed(3)}";
         } else {
           color = const Color.fromARGB(0xff, 0, 0xff, 0);
-          title = "Real " + face['liveness'].toString();
+          title = "Real ${face['liveness'].toStringAsFixed(3)}";
         }
 
-        TextSpan span =
-            TextSpan(style: TextStyle(color: color, fontSize: 20), text: title);
+        final String simText =
+            similarity < 0 ? "Sim -" : "Sim ${similarity.toStringAsFixed(3)}";
+        final Color simColor = similarity > identifyThreshold
+            ? const Color.fromARGB(0xff, 0, 0xff, 0)
+            : const Color.fromARGB(0xff, 0xff, 0xa5, 0);
+
+        TextSpan span = TextSpan(
+          style: TextStyle(color: color, fontSize: 20),
+          text: title,
+          children: [
+            TextSpan(text: "\n$simText", style: TextStyle(color: simColor)),
+          ],
+        );
         TextPainter tp = TextPainter(
             text: span,
             textAlign: TextAlign.left,
             textDirection: TextDirection.ltr);
         tp.layout();
-        tp.paint(canvas, Offset(face['x1'] / xScale, face['y1'] / yScale - 30));
+        tp.paint(canvas, Offset(face['x1'] / xScale, face['y1'] / yScale - 55));
 
         paint.color = color;
         canvas.drawRect(

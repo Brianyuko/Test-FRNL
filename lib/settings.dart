@@ -285,10 +285,10 @@ class SettingsPageState extends State<SettingsPage> {
                 onPressed: (value) => restoreSettings(),
               ),
               SettingsTile.navigation(
-                title: const Text('Clear all person'),
+                title: const Text('Clear all employee (Mock Server + lokal)'),
                 leading: const Icon(Icons.clear_all),
                 onPressed: (value) {
-                  widget.homePageState.deleteAllPerson();
+                  widget.homePageState.deleteAllEmployees();
                 },
               ),
             ],
